@@ -7,6 +7,7 @@ import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 private const val MIN_CHARGING_SESSION_PERCENTAGE = 10
+private const val USAGE_CHART_WINDOW_MILLIS = 24 * 60 * 60 * 1000L
 private const val MAX_RECORD_GAP_SECONDS = 120L
 private const val EXPECTED_SCREEN_ON_RECORD_INTERVAL_SECONDS = 2L
 private const val MAX_CONTINUOUS_SCREEN_ON_GAP_SECONDS = 5L
@@ -35,8 +36,13 @@ data class BatteryStatsReport(
     var temperatureDataPoints: DataPointList = listOf()
 )
 
+data class BatteryUsageSegment(
+    val dataPoints: DataPointList = listOf(),
+    val isCharging: Boolean = false
+)
+
 data class BatteryUsageReport(
-    val percentageDataPoints: DataPointList = listOf(),
+    val percentageSegments: List<BatteryUsageSegment> = listOf(),
     val screenOnDuration: Long = 0L,
     val remainingUsageTime: Long = 0L
 )
@@ -206,7 +212,7 @@ class BatteryStatsRecordAnalysis(private val records: List<BatteryStatsItem>) {
     fun analyzeUsage(): BatteryUsageReport {
         val screenStats = calculateScreenPowerStats()
         return BatteryUsageReport(
-            percentageDataPoints = calculateUsagePercentageDataPoints(),
+            percentageSegments = calculateUsagePercentageSegments(),
             screenOnDuration = screenStats.screenOn.duration,
             remainingUsageTime = calculateRemainingUsageTime()
         )
@@ -243,58 +249,63 @@ class BatteryStatsRecordAnalysis(private val records: List<BatteryStatsItem>) {
         )
     }
 
-    // 只取当前所处的一段充电会话或一段放电会话, 避免充电与放电的曲线混在同一张图里
-    private fun getCurrentUsageSessionRecords(): List<BatteryStatsItem> {
-        if (records.isEmpty()) {
+    // 取最近 24 小时的电量记录, 按充电/放电切成若干段, 便于在同一张图上分别着色
+    private fun calculateUsagePercentageSegments(): List<BatteryUsageSegment> {
+        val windowBeginTimestamp = GetTimeStamp() - USAGE_CHART_WINDOW_MILLIS
+        val windowRecords = records
+            .filter { it.timestamp > windowBeginTimestamp }
+            .sortedBy { it.timestamp }
+        if (windowRecords.isEmpty()) {
             return listOf()
         }
 
-        var endPos = records.lastIndex
-        while (endPos >= 0 && !records[endPos].isCharging() && !records[endPos].isDischarging()) {
-            endPos--
-        }
-        if (endPos < 0) {
-            return listOf()
-        }
-
-        val charging = records[endPos].isCharging()
-        var beginPos = endPos
-        while (beginPos > 0) {
-            val previousRecord = records[beginPos - 1]
-            val previousRecordInSession =
-                if (charging) previousRecord.isCharging() else previousRecord.isDischarging()
-            if (!previousRecordInSession) {
-                break
+        val knownRecords = mutableListOf<Pair<BatteryStatsItem, Boolean>>()
+        for (record in windowRecords) {
+            if (record.isCharging()) {
+                knownRecords.add(Pair(record, true))
+            } else if (record.isDischarging()) {
+                knownRecords.add(Pair(record, false))
             }
-            beginPos--
         }
-        return records.subList(beginPos, endPos + 1)
-    }
-
-    private fun calculateUsagePercentageDataPoints(): DataPointList {
-        val usageSessionRecords = getCurrentUsageSessionRecords()
-        if (usageSessionRecords.isEmpty()) {
+        if (knownRecords.isEmpty()) {
             return listOf()
         }
 
-        val percentageDataPoints: DataPointMutableList = mutableListOf()
-        val beginTimestamp = usageSessionRecords.first().timestamp
-        var lastPercentage: Int? = null
-        for (record in usageSessionRecords) {
-            if (record.batteryPercentage == lastPercentage) {
-                continue
+        val beginTimestamp = windowRecords.first().timestamp
+        val segments: MutableList<BatteryUsageSegment> = mutableListOf()
+        var beginPos = 0
+        while (beginPos < knownRecords.size) {
+            val isCharging = knownRecords[beginPos].second
+            var endPos = beginPos
+            while (endPos + 1 < knownRecords.size && knownRecords[endPos + 1].second == isCharging) {
+                endPos++
             }
-            val x = (record.timestamp - beginTimestamp).toFloat()
-            percentageDataPoints.add(Pair(x, record.batteryPercentage.toFloat()))
-            lastPercentage = record.batteryPercentage
-        }
 
-        val lastRecord = usageSessionRecords.last()
-        val lastRecordX = (lastRecord.timestamp - beginTimestamp).toFloat()
-        if (lastRecordX > percentageDataPoints.last().first) {
-            percentageDataPoints.add(Pair(lastRecordX, lastRecord.batteryPercentage.toFloat()))
+            val dataPoints: DataPointMutableList = mutableListOf()
+            var lastPercentage: Int? = null
+            for (pos in beginPos..endPos) {
+                val record = knownRecords[pos].first
+                if (record.batteryPercentage == lastPercentage) {
+                    continue
+                }
+                dataPoints.add(
+                    Pair(
+                        (record.timestamp - beginTimestamp).toFloat() / 1000f,
+                        record.batteryPercentage.toFloat()
+                    )
+                )
+                lastPercentage = record.batteryPercentage
+            }
+
+            val lastRecord = knownRecords[endPos].first
+            val lastRecordX = (lastRecord.timestamp - beginTimestamp).toFloat() / 1000f
+            if (dataPoints.isEmpty() || lastRecordX > dataPoints.last().first) {
+                dataPoints.add(Pair(lastRecordX, lastRecord.batteryPercentage.toFloat()))
+            }
+            segments.add(BatteryUsageSegment(dataPoints, isCharging))
+            beginPos = endPos + 1
         }
-        return percentageDataPoints
+        return segments
     }
 
     private fun calculateScreenOnAveragePower(): Double {

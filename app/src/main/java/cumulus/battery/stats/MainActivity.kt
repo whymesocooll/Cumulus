@@ -52,8 +52,9 @@ import cumulus.battery.stats.ui.theme.cumulusColor
 import cumulus.battery.stats.utils.BatteryStatsRecordAnalysis
 import cumulus.battery.stats.utils.BatteryUsageReport
 import cumulus.battery.stats.utils.DurationToText
+import cumulus.battery.stats.widgets.ChartLineSegment
 import cumulus.battery.stats.widgets.GoToButton
-import cumulus.battery.stats.widgets.SingleLineChart
+import cumulus.battery.stats.widgets.SegmentedLineChart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -368,13 +369,21 @@ class MainActivity : ComponentActivity() {
             verticalArrangement = Arrangement.Top,
             horizontalAlignment = Alignment.Start
         ) {
-            SingleLineChart(
-                dataPointList = usageReport.percentageDataPoints,
+            SegmentedLineChart(
+                lineSegments = usageReport.percentageSegments.map { segment ->
+                    ChartLineSegment(
+                        dataPoints = segment.dataPoints,
+                        lineColor = if (segment.isCharging) {
+                            cumulusColor().green
+                        } else {
+                            cumulusColor().orange
+                        }
+                    )
+                },
                 modifier = Modifier
                     .padding(start = 20.dp, end = 20.dp, top = 20.dp)
                     .height(120.dp)
                     .fillMaxWidth(),
-                lineColor = cumulusColor().blue,
                 yAxisMaxValue = 100
             )
             Row(
