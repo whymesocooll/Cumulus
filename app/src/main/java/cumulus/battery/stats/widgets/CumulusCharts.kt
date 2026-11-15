@@ -352,6 +352,169 @@ fun SingleLineChart(
     }
 }
 
+data class ChartLineSegment(
+    val dataPoints: DataPointList,
+    val lineColor: Color
+)
+
+private data class ColoredDataPoint(
+    val x: Float,
+    val y: Float,
+    val color: Color
+)
+
+private fun NormalizeChartLineSegments(lineSegments: List<ChartLineSegment>): List<ColoredDataPoint> {
+    val coloredDataPoints = mutableListOf<ColoredDataPoint>()
+    for (lineSegment in lineSegments) {
+        for (dataPoint in lineSegment.dataPoints) {
+            coloredDataPoints.add(
+                ColoredDataPoint(
+                    x = dataPoint.first,
+                    y = dataPoint.second,
+                    color = lineSegment.lineColor
+                )
+            )
+        }
+    }
+    if (coloredDataPoints.size <= 1) {
+        return coloredDataPoints
+    }
+
+    val normalizedDataPoints = mutableListOf<ColoredDataPoint>()
+    for (dataPoint in coloredDataPoints.sortedBy { it.x }) {
+        if (normalizedDataPoints.isNotEmpty() && normalizedDataPoints.last().x == dataPoint.x) {
+            normalizedDataPoints[normalizedDataPoints.lastIndex] = dataPoint
+        } else {
+            normalizedDataPoints.add(dataPoint)
+        }
+    }
+    return normalizedDataPoints
+}
+
+private fun SimplifyColoredDataPoints(
+    dataPoints: List<ColoredDataPoint>
+): List<ColoredDataPoint> {
+    if (dataPoints.size <= MAX_CHART_DATA_POINTS) {
+        return dataPoints
+    }
+
+    val colorByX = mutableMapOf<Float, Color>()
+    for (dataPoint in dataPoints) {
+        colorByX[dataPoint.x] = dataPoint.color
+    }
+    return SimplifyDataPoints(dataPoints.map { Pair(it.x, it.y) }).map { dataPoint ->
+        ColoredDataPoint(
+            x = dataPoint.first,
+            y = dataPoint.second,
+            color = colorByX[dataPoint.first] ?: Color.Transparent
+        )
+    }
+}
+
+@Composable
+fun SegmentedLineChart(
+    modifier: Modifier,
+    lineSegments: List<ChartLineSegment>,
+    yAxisMaxValue: Int? = null
+) {
+    val density = LocalContext.current.resources.displayMetrics.density
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val tickMarkColor = Color(0xFFAAAAAA)
+    val coloredDataPoints = SimplifyColoredDataPoints(NormalizeChartLineSegments(lineSegments))
+    val dataPoints = coloredDataPoints.map { Pair(it.x, it.y) }
+    val tickValues = GetDataPointsTickValues(dataPoints, yAxisMaxValue)
+    val tickMax = tickValues.last().toFloat()
+
+    Canvas(
+        modifier = modifier
+    ) {
+        val nativeCanvas = drawContext.canvas.nativeCanvas
+        val chartLeft = DpToPx(density, 2f)
+        val chartRight = size.width - DpToPx(density, 20f)
+        val chartTop = DpToPx(density, 5f)
+        val chartBottom = size.height - DpToPx(density, 5f)
+
+        val gridColor = tickMarkColor.copy(alpha = 0.5f)
+        for (tickValue in tickValues) {
+            val y = GetYForValue(tickValue.toFloat(), tickMax, chartTop, chartBottom)
+            drawLine(
+                color = gridColor,
+                strokeWidth = DpToPx(density, 0.5f),
+                start = Offset(x = 0f, y = y),
+                end = Offset(x = chartRight, y = y),
+                pathEffect = PathEffect.dashPathEffect(
+                    intervals = floatArrayOf(DpToPx(density, 4f), DpToPx(density, 4f)),
+                    phase = 0f
+                )
+            )
+        }
+
+        val tickPaint = CreateTextPaint(density, primaryColor, Paint.Align.RIGHT)
+        for (tickValue in tickValues) {
+            val y = GetYForValue(tickValue.toFloat(), tickMax, chartTop, chartBottom) +
+                    DpToPx(density, 3f)
+            nativeCanvas.drawText(
+                tickValue.toString(),
+                size.width - DpToPx(density, 2f),
+                y,
+                tickPaint
+            )
+        }
+
+        if (dataPoints.size < 2) {
+            return@Canvas
+        }
+
+        var beginIndex = 0
+        while (beginIndex < coloredDataPoints.size) {
+            var endIndex = beginIndex
+            while (endIndex + 1 < coloredDataPoints.size &&
+                coloredDataPoints[endIndex + 1].color == coloredDataPoints[beginIndex].color
+            ) {
+                endIndex++
+            }
+
+            // 相邻分段共用转折点, 这样充电段与放电段之间不会出现断口
+            val pathBeginIndex = if (beginIndex > 0) beginIndex - 1 else beginIndex
+            val segmentDataPoints = (pathBeginIndex..endIndex).map {
+                Pair(coloredDataPoints[it].x, coloredDataPoints[it].y)
+            }
+            if (segmentDataPoints.size >= 2) {
+                val lineColor = coloredDataPoints[beginIndex].color
+                val (linePath, fillPath) = BuildChartPaths(
+                    dataPoints = segmentDataPoints,
+                    tickMax = tickMax,
+                    chartLeft = chartLeft,
+                    chartRight = chartRight,
+                    chartTop = chartTop,
+                    chartBottom = chartBottom
+                )
+                drawPath(
+                    path = fillPath,
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            lineColor.copy(alpha = 0.25f),
+                            lineColor.copy(alpha = 0f)
+                        ),
+                        startY = chartTop,
+                        endY = chartBottom
+                    )
+                )
+                drawPath(
+                    path = linePath,
+                    color = lineColor,
+                    style = Stroke(
+                        width = DpToPx(density, 2f),
+                        cap = StrokeCap.Round,
+                        join = StrokeJoin.Round
+                    )
+                )
+            }
+            beginIndex = endIndex + 1
+        }
+    }
+}
+
 @Composable
 fun MultiLineChart(
     modifier: Modifier,
